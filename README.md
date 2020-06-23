@@ -11,10 +11,12 @@ To be able to run the audio player (quickPlayer.py), you need to install PyAudio
 
 
 **Notebooks:**  
-mc_crop : After putting audio files into "musiccritic" folder, run this. Cropped .wav files together with altered onset annotations will go into "musiccritic_cropped" folder. It crops the unwanted (silence, somebody talking etc.) parts from beginning and end of the recordings.    
+mc_crop: After putting audio files into "musiccritic" folder, run this. Cropped .wav files together with altered onset annotations will go into "musiccritic_cropped" folder. It crops the unwanted (silence, somebody talking etc.) parts from the beginning and the end of the recordings.    
 
-main: First cell installs GuitarSet and unzips to "guitarset" folder. Usage of onset detection and audio player is shown.    
-chord_segmentation: In chord exercises, rise time of the chords and spacing of individual strings are important. This notebook shows a prototype.    
+main: First cell installs GuitarSet and unzips to "guitarset" folder. Usage of onset detection and audio player is shown.
+
+chord_segmentation: In chord exercises, rise time of the chords and spacing of individual strings are important. This notebook shows a prototype.
+
 od_comparison: Onset detection algorithms applied on whole datasets. You need "madmom" library for CNN Onset Detector.  
 
 
@@ -22,7 +24,7 @@ od_comparison: Onset detection algorithms applied on whole datasets. You need "m
 
 GuitarSet
 
-|                     | F-score | Precision | Recall |
+|         Overall     | F-score | Precision | Recall |
 |---------------------|---------|-----------|--------|
 | CNN Onset Detector  | 0.84   | 0.78     | 0.92  |
 | GuitarOnsetDetector |   0.71      |    0.95       |    0.59  |
@@ -32,7 +34,7 @@ GuitarSet
 
 Music Critic Dataset 
 
-|                     | F-score | Precision | Recall |
+|          Overall    | F-score | Precision | Recall |
 |---------------------|---------|-----------|--------|
 | CNN Onset Detector  | 0.70   | 0.59     | 0.92  |
 | GuitarOnsetDetector |   0.80 | 0.80    | 0.80  |

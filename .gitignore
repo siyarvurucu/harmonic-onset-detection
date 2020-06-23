@@ -1,2 +1,5 @@
-# guitarset audio files
+#  audio files
 guitarset/*.wav
+musiccritic_cropped/*.wav
+musiccritic/*.wav
+*.pyc

@@ -26,7 +26,7 @@ GuitarSet: https://github.com/marl/GuitarSet
 Annotation of the music critic dataset is done with https://github.com/srvrc/Sound-Annotator  
 
 
-----------------------| GuitarSet| Music Critic Dataset|
+|---------------------| GuitarSet| Music Critic Dataset|
 | Chord Files         | F-score | Precision | Recall | F-score | Precision | Recall |
 |---------------------|---------|-----------|--------|---------|-----------|--------|
 | CNN Onset Detector  | 0.84   | 0.78     | 0.92  |0.84   | 0.78     | 0.92  |

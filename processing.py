@@ -1,106 +1,32 @@
 import numpy as np
-from scipy.signal import get_window
-from scipy.signal import find_peaks_cwt
+
 from scipy.signal import savgol_filter
 import utilFunctions as UF
-import dftModel as DFT
+
 import json
 import matplotlib.pyplot as plt
 plt.rcParams["figure.figsize"] = (20,5)
-from matplotlib import collections  as mc
+
 import IPython.display as ipd
+from scipy.io.wavfile import read
 
-def MRStft(x,w,N,H,B,fs):  
-    
-    hM1 = []
-    hM2 = []
-    
-    for i in range (len(B)):    
-        hM1.append(int(np.floor((w[i].size+1)/2)))
-        w[i] = w[i] / sum(w[i])                             
-    
-    x = np.append(np.zeros(max(hM2)),x)                
-    x = np.append(x,np.zeros(max(hM1)))                 
-    
-    pin = max(hM1)   # hM1 is assumed to be bigger than H 
-    pend = x.size- max(hM1)
-    
-    xmX = []
-    xpX = []
-    while pin<pend:   
-        
-        fmX = np.array([])
-        fpX = np.array([])
-    #-----analysis-----
-        for i in range (len(B)):
-            x1 = x[pin-hM1[i]:pin+hM2[i]] 
-            mX, pX = DFT.dftAnal(x1, w[i], N)          
-            fmX = np.append(fmX,mX[int(B[i][0]/(fs/N)):int(B[i][1]/(fs/N))])
-            fpX = np.append(fpX,pX[int(B[i][0]/(fs/N)):int(B[i][1]/(fs/N))])
-        xmX.append(fmX)
-        xpX.append(fpX)
-        pin += H 
-    return np.asarray(xmX),np.asarray(xpX)
+from segmentation import getSegments
+from transform import *
 
-def MRStftSynth(mY,pY,M,H,B,fs):  
     
-    hM1 = []
-    hM2 = []
-    nFrames = mY[:,0].size
-    
-    for i in range (len(B)):    
-        hM1.append(int(np.floor((M[i]+1)/2)))  # half analysis window size by rounding
-        hM2.append(int(np.floor(M[i]/2)))            
-    
-    y = np.zeros(nFrames*H + max(hM1) + max(hM2))    # add zeros at the end to analyze last sample
-     
-    for i in range(len(B)):
-        pin = max(hM1)   # hM1 is assumed to be bigger than H 
-        pend = nFrames*H- max(hM1)
-        yB = np.zeros(nFrames*H + max(hM1) + max(hM2))
-    #-----synth-----
-        for j in range(nFrames):
-            y1 = DFT.dftSynth(mY[j,:], pY[j,:], M[i]) 
-            yB[pin-hM1[i]:pin+hM2[i]] += H*y1    # overlap-add to generate output sound
-            pin += H
-        y += yB
-
-    return y
-
-def fTransform(x):
-    window = 'blackman'
-    fs = 44100
-    M = [8191,4096,2048,1024]
-    N = 16384
-    H = 128
-    w = []
-    B = [[0,400],[400,800],[800,2000],[2000,22053]]
-    for i in range(len(M)):
-        w.append(get_window(window, M[i], fftbins=True))
-        
-    mX,pX = MRStft(x,w,N,H,B,fs)
-    
-    return mX,pX
-    
-def MRSF(mX,pX,B=[0,8193],a=51,b=3):
+def MRSF(mX,B=[0,2000],a=51,b=3,size = 0.2):
     
     f = mX[1:,B[0]:B[1]]-mX[:-1,B[0]:B[1]]
     f[f<0] = 0
     sf = np.sum(f,axis=1)
-    sf[:20] = np.mean(sf)
-    sf[-20:] = np.mean(sf)
     
-    sfn = sf/np.max(sf)
-    #plt.plot(sf)
-    #plt.show()
-    sf_filtered = savgol_filter(sf, a, b,deriv=0)
-    #plt.plot(sf_filtered)
-    #plt.show()
-    result=sf_filtered/np.max(sf_filtered) # ??
-    #result[:20] =
-    #plt.plot(result)
-    #plt.show()
-    return np.asarray(result),sfn,mX,pX
+    sfn = (sf)/np.max(np.abs(sf))
+    
+    sf_filtered = savgol_filter(sfn, a, b,deriv=0)
+    #sf_filtered = signal.smooth(sfn,a)
+    result=sf_filtered/np.max(sf_filtered)
+    
+    return np.asarray(result),sfn
     
 def harmonicWeights(nH,c,p):
     """
@@ -112,15 +38,15 @@ def harmonicWeights(nH,c,p):
     """
     return np.exp(-np.arange(1,nH+1)/np.exp((nH+c-p)))
 
-def candidSelection(sf):
+def candidSelection(sf,t=0.1,hw=50):
     """
     sf: spectral flux
     returns indexes of onset candidate frames
     """
 
-    k=20   # half window size for peak detection
-    thres = 0.02 # relative energy threshold 
-    
+    k=hw   # half window size for peak detection
+    thres = t # relative energy threshold 
+    sf = np.concatenate((np.mean(sf)*np.ones(k),sf,np.mean(sf)*np.ones(k)))
     det = np.zeros(sf.shape)
     
     means = [0 for i in range(k)]
@@ -131,170 +57,196 @@ def candidSelection(sf):
         if np.all(sf[i+k]>=sf[i:i+k])&np.all(sf[i+k]>=sf[i+k:i+2*k])&(sf[i+k]>(mean+thres)):
             det[i+k]=1
     means.extend([0 for i in range(k)])
+    det = det[hw:-hw]
+    
+    det[:2*k] = 0
+    det[-2*k:] = 0
     idx = np.nonzero(det)[0]   
 
     return idx
     
-def odf(sf,sfn,mX,pX,params=None,verbose=[],onlySelected=False,hc=-3,div=10,L=30):
-
-    fs = 44100
+def ha(sf,sfn,mX,pX,params,verbose=[],onlySelected=False,hc=-2,div=8,L=30,fs=44100,gt=[]):
+    """
+    Applies harmonic analysis to onset candidates and returns the selected ones
     
-    idx = candidSelection(sf)    
+    sf: spectral flux (filtered). used for candidate selection
+    sfn: raw spectral flux. will be used for chord segmentation later
+    mX, pX: freq. transform. mX is used, pX is for synthesis and observation purposes
+    verbose: onset candids in this list will enable verbose mode.
+    onlySelected: if True, only the candidates in verbose list will be processed.
+    
+    params: parameters used in freq. transform
+    
+    """
+    
+    M,N,H,B = params
+    
+    idx = candidSelection(sf,t=0.025,hw=25)    
     idx = np.concatenate((np.zeros(1),idx,np.array([sf.shape[0]])))
+    idx_orig = idx.copy()
     mask = np.ones(idx.shape)
     mask[0]=0
     mask[-1]=0
     errors = np.zeros(mX.shape[0])
     scores = np.zeros(idx.shape)
+    freqs = []
     
+    tFlag = False
     vFlag = False # flag to enable prints and plots
     
-    for i in range(1,len(idx)-1):
-        
+    rms = np.sum(mX,axis=1)
+    rms = rms-np.mean(rms)
+    rms = rms/np.max(rms)
+    rms = savgol_filter(rms,3,1)
+    
+    rms_t = -0.1
+    
+    # sending every onset candidate to harmonic analysis
+    for i in range(len(idx)-2,0,-1):
+                
         if onlySelected:
             if idx[i] not in verbose:
                 continue
+                
+        b = int((idx[i]-(10240/H)) if (idx[i]>(idx[i-1]+(10240/H))) else idx[i-1])
+        e = int((idx[i]+(10240/H)) if (idx[i]<(idx[i+1]-(10240/H))) else idx[i+1])
         
-        b = int((idx[i]-(9600/128)) if (idx[i]>(idx[i-1]+(9600/128))) else idx[i-1])
-        e = int((idx[i]+(9600/128)) if (idx[i]<(idx[i+1]-(9600/128))) else idx[i+1])
+        
+        if np.mean(rms[int(idx[i]):int(idx[i])+50])<rms_t:
+            continue
+        
         onst = int(idx[i]-b)
         pmX = np.copy(mX[b:e])
         
+
         if idx[i] in verbose:
-            print("\nONSET")
+            print("\nOnset candidate:")
             print("onset frame: %d" %idx[i])
             print("sf onset number: %d" %i)
             vFlag = True
-            M = [8191,4096,2048,1024]
-            N = 16384
-            H = 128
-            B = [[0,400],[400,800],[800,2000],[2000,22053]]
-            y = MRStftSynth(pmX,pX[b:e],M,H,B,44100)
-            ipd.display(ipd.Audio(data=y, rate=44100))
+            y = MRStftSynth(pmX,pX[b:e],M,H,B)
+            print("synthesized sound")
+            ipd.display(ipd.Audio(data=y, rate=fs))
             
         if vFlag:
+            print("STFT around candidate")
             plt.pcolormesh(np.arange(pmX.shape[0]), np.arange(pmX.shape[1]), np.transpose(pmX))
             plt.show()
-        
-        allErrors,allf0s,rmX = f0detection(pmX,pX[b:e],sfn[b:e],-90,10,onst,vFlag,16384,hc,div)
-          
-        
-        if vFlag:
-            xdata = []
-            ydata = []
-            srea = []
-            for k in range(len(allf0s)):  # k frame, j freqs
-                for j in range(len(allf0s[k])):
-                    xdata.append(idx[i]+k)
-                    ydata.append(allf0s[k][j])
-                    srea.append(mX[b:e][k][int(allf0s[k][j])])
-                    
-            plt.scatter(xdata, ydata, (2**10)*10**(np.asarray(srea)/20), alpha=0.5)
+            
+            print("filtered spectral flux")
+            plt.plot(sf[b:e])
+            plt.show()
+            print("raw spectral flux")
+            plt.plot(sfn[b:e])
             plt.show()
         
-       
-        segments = getSegments(allf0s,allErrors,onst,mX[b:e],vFlag)
-        scores[i] = harmonicScore(segments,L,vFlag)
+        allErrors,allf0s,pmXv = f0detection(pmX,pX[b:e],sfn[b:e],-100,10,onst,vFlag,hc,div,params,fs,tFlag)
+
+        aL = np.min((e-idx[i]/2,L))  
+        segments = getSegments(allf0s,allErrors,onst,pmX,vFlag)
+        scores[i],freq,segmentScores = harmonicScore(segments,aL,vFlag,tFlag)
+        freqs.append(freq)
         
+        if scores[i]<1: # prevent rejected candidates from creating boundary for adjacent onset
+            idx[i] = sf.shape[0]
+            
         if vFlag:
             print("Score for this onset: %d" %scores[i])
-        
+            
+        if tFlag and scores[i]<1:
+            pred_time = np.abs(idx[i]*(H/fs))
+            closest_gt_ind = np.argmin(pred_time-gt)[0]
+            if np.abs(gt[closest_gt_ind]-pred_time)<0.05:
+                if score[i]>1:
+                    tp.append[idx[i]]
+                if score[i]<1:
+                    fn.append[idx[i]]
+                    
+                    print("STFT around onset")
+                    plt.pcolormesh(np.arange(pmX.shape[0]), np.arange(pmX.shape[1]), np.transpose(pmX))
+                    plt.show()
+                    
+                    y = MRStftSynth(pmXv,pX,M,H,B)
+                    ipd.display(ipd.Audio(data=y, rate=fs))
+                    
+                    plt.pcolormesh(np.arange(pmXv.shape[0]), np.arange(pmXv.shape[1]), np.transpose(pmXv))
+                    plt.show()
 
-        minerrors = []  # for observation
-        for err in allErrors:
-            minerrors.append(min(err))          
-        errors[int(idx[i]):e] = minerrors[onst:int(e-b)]
-       
         vFlag = False
+        tFlag = False
     
     avg = np.mean(scores)
     mask[scores<1] = 0
-    result = idx[mask==1]
-    return idx[1:-1],result,errors,scores[1:-1]
+    result = idx_orig[mask==1]
+    return idx_orig[1:-1],result,freqs,scores[1:-1]
     
-def dBsum(dBs,axis=None):
-    totaldB = 20*np.log10(np.sum(10**(dBs/20),axis=axis))
-    return totaldB
+def f0detection(pmX,pX,sfn,t,n,onset,verbose,hc,div,params,fs=44100,tFlag=False):
     
-    
-def f0detection(pmX,pX,sfn,t,n,onset,verbose,N,hc,div):
-    
-    M = [8191,4096,2048,1024]
-    N = 16384
-    H = 128
-    B = [[0,400],[400,800],[800,2000],[2000,22053]]
-    fs = 44100
+    M,N,H,B = params
     peaks = []
     allErrors = []
     allf0s = []
-    
-    if verbose:
-        fa = np.zeros(pmX.shape[0]-1)
-        for i in range(len(B)):
-            f = pmX[1:,int(B[i][0]*(N/fs)):int(B[i][1]*(N/fs))]-pmX[:-1,int(B[i][0]*(N/fs)):int(B[i][1]*(N/fs))]
-            ivf = f.copy()
-            ivf[ivf>0] = 0
-            f[f<0] = 0
-            print(B[i][0],B[i][1])
-            f = np.sum(f,axis=1)
-            plt.plot(f)
-            plt.show()
-            fa = fa+f
+    pmXv = None
+    binWidth = (fs/N)
      
-        fa -= f
-        print("sf lower freqs")
-        plt.plot(fa)
-        plt.show() 
-        print("filtered")
-        sf_filtered = savgol_filter(fa, 51, 3,deriv=0)
-        sf_filtered=sf_filtered/np.max(sf_filtered)
-        plt.plot(sf_filtered)
-        plt.show()
-    
-    diff_idx0 = onset-4
-    diff_idx1 = onset+4
-    
-    diff = np.max(pmX[diff_idx1:,:],axis=0)-pmX[diff_idx0,:]
-    diffr = np.repeat(diff[np.newaxis,:]>np.abs(pmX[diff_idx0]/div),pmX.shape[0]-onset,axis=0)
+    diff_idx0 = [(onset-8)//2 - 4,onset-8]
+    diff_idx1 = [onset+4,(pmX.shape[0]+onset+4)//2]
+
+    bOnsetEavg = np.mean(pmX[diff_idx0[0]:diff_idx0[1],:],axis=0)
 
 
-    # peak detection
-    for i in range(pmX[:onset].shape[0]): # 
-        peaks.append(UF.peakDetection(pmX[i],t))
+    diff = np.mean(pmX[diff_idx1[0]:diff_idx1[1],:],axis=0)-bOnsetEavg
+    diffr = np.repeat(diff[np.newaxis,:]>np.abs(bOnsetEavg/div),pmX.shape[0]-onset,axis=0)
+
+    mask_t = 10
+    right_m = 8
+    for i in range(pmX[:onset].shape[0]):
+        curPeaks = UF.peakDetection(pmX[i],t)
+        peaks.append(curPeaks[curPeaks>(70/binWidth)])  
         
     for i in range(pmX[onset:].shape[0]):
-        upeaks = UF.peakDetection(pmX[onset+i],t)
-        upeaks = upeaks[diff[upeaks]>np.abs(pmX[diff_idx0]/div)[upeaks]]
-        peaks.append(upeaks)
-    
-    if verbose:
-        pmX[onset:] = np.where(diffr,pmX[onset:],np.min(pmX[onset:]))
-        y = MRStftSynth(pmX,pX,M,H,B,44100)
-        ipd.display(ipd.Audio(data=y, rate=44100))
+        mask = np.ones(pmX.shape[1])*t
+        curPeaks = UF.peakDetection(pmX[onset+i],t)
+        curPeaks = curPeaks[curPeaks>(70/binWidth)]
+        for c in curPeaks[curPeaks<500]:
+            pMag = pmX[onset+i][c]
+            pMag_tri = np.append(np.linspace(pMag,int(pMag-8*c/10),c//10)[::-1],np.linspace(pMag,int(pMag-8*c/10),right_m*c//10+1)[1:])-1
+            #pMag = np.ones(mask[int(c-c/10):int(c+c/10)].size)*pMag
+            mask[c-c//10:c+right_m*c//10] = np.amax((pMag_tri,mask[c-c//10:c+right_m*c//10]),axis=0)
+        curPeaks_masked = curPeaks[pmX[onset+i][curPeaks]>mask[curPeaks]]
+        curPeaks_masked_t = curPeaks_masked[diff[curPeaks_masked]>np.abs(bOnsetEavg/div)[curPeaks_masked]]
+        peaks.append(curPeaks_masked_t)
         
-        plt.pcolormesh(np.arange(pmX.shape[0]), np.arange(pmX.shape[1]), np.transpose(pmX))
-        plt.vlines([diff_idx1,diff_idx0,onset],ymax=N/2,ymin=0) 
+    
+    pmXv = np.copy(pmX)
+    pmXv[onset:] = np.where(diffr,pmXv[onset:],np.min(pmXv[onset:]))
+    
+    if verbose: 
+        print("remaining sound after elimination frequencies that do not contribute enough to energy increase for this candidate")
+        
+        y = MRStftSynth(pmXv,pX,M,H,B)
+        ipd.display(ipd.Audio(data=y, rate=fs))
+        
+        plt.pcolormesh(np.arange(pmXv.shape[0]), np.arange(pmXv.shape[1]), np.transpose(pmXv))
+        plt.vlines([diff_idx1[0],diff_idx1[1],diff_idx0[0],diff_idx0[1],onset],ymax=N/2,ymin=0) 
         plt.show()
     
     peaks = np.asarray(peaks)
+ 
+
+     # evaluation of peaks
     
-    binWidth = (44100/N)
+    for k in range(onset,pmX.shape[0],1):
     
-    for k in range(pmX.shape[0]):
-       
         peaksinRange = peaks[k][np.logical_and(peaks[k]>(75/binWidth),peaks[k]<(2000/binWidth))]
-        candidatesf0 = peaksinRange[np.argsort(pmX[k][peaksinRange])[::-1]][:10] 
+        candidatesf0 = peaksinRange[np.argsort(pmX[k][peaksinRange])[::-1]][:5] 
         
-        if verbose:
-                if k == diff_idx1:
-                    plt.plot(pmX[k][:2000])
-                    plt.show()
                     
         if candidatesf0.size==0:
             allf0s.append([0])
             allErrors.append([1000])
-            if verbose:
-                print("No f0 candidate at frame %d" %k)
+            if tFlag:
+                print("FN: no f0 candidate")
             continue
 
                 
@@ -309,15 +261,7 @@ def f0detection(pmX,pX,sfn,t,n,onset,verbose,N,hc,div):
 
         for j in candidatesf0:
             cPeaks = []
-            remaining=peaks[k].copy()
             
-            if verbose:
-            
-                if k == diff_idx1:
-                    print("%d.th frame" %k)
-                    print("f0 cand. %d" %j)
-                    print("peaks")
-                    print(remaining)
                     
             nHarmonics = n
             nHarmonicsUsed.append(nHarmonics)
@@ -326,10 +270,10 @@ def f0detection(pmX,pX,sfn,t,n,onset,verbose,N,hc,div):
             hErrors = []
             presentH = nHarmonics
             for i in np.arange(1,nHarmonics+1):
-                cPeak = np.argmin(np.abs(remaining-i*j))
+                cPeak = np.argmin(np.abs(peaks[k]-i*j))
 
                 distance = peaks[k][cPeak]-i*j
-                if np.abs(distance)>(3*i):
+                if np.abs(distance)>(i):
                     error = 30
                     presentH -= 1
                 else:
@@ -341,12 +285,13 @@ def f0detection(pmX,pX,sfn,t,n,onset,verbose,N,hc,div):
             sum_error = np.sum(hWeights*hErrors)
 
             if verbose:
-                if k == diff_idx1:
-                    print("error: %d"%sum_error)
+                if k == diff_idx1[1]:
+                    print("candidate %d error: %d"%(j,sum_error))
             errors.append(sum_error)
     
         f0s = []
         f0sErrors = []
+        
         # evaluating the errors for possible missing f0s
         for c in candidatesf0:
             possibleFreqs = np.abs(np.round(c/candidatesf0)-c/candidatesf0)<(1/candidatesf0)
@@ -394,98 +339,19 @@ def f0detection(pmX,pX,sfn,t,n,onset,verbose,N,hc,div):
 
         allErrors.append(f0sErrors)
         allf0s.append(f0s)
-
-    return allErrors,allf0s,pmX
-
+    return allErrors,allf0s,pmXv
 
 
-def getSegments(allf0s,allErrors,onset,mX,verbose):
-    lines = []
-    segments_open = {}
-    segments_closed = {}
-    for i in range(len(allf0s[onset:])):
-        open_increasing = {key:False for key in segments_open}
-        
-        for j in range(len(allf0s[onset+i])):
-    
-            if allErrors[onset+i][j]<100:
-            
-                if allf0s[onset+i][j] in segments_open:
-                    harmonicsMag = dBsum(mX[onset+i][(allf0s[onset+i][j]*np.arange(1,10)).astype(int)])
-                    segments_open[allf0s[onset+i][j]][0].append(harmonicsMag)
-                    segments_open[allf0s[onset+i][j]][2].append(allErrors[onset+i][j])
-                    open_increasing[allf0s[onset+i][j]] = True
-                    
-                elif (allf0s[onset+i][j]+1) in segments_open:
-                    
-                    segments_open[allf0s[onset+i][j]] = segments_open[allf0s[onset+i][j]+1]
-                    del segments_open[allf0s[onset+i][j]+1]
-                    del open_increasing[allf0s[onset+i][j]+1]
-                    
-                    harmonicsMag = dBsum(mX[onset+i][((allf0s[onset+i][j])*np.arange(1,10)).astype(int)])
-                    segments_open[allf0s[onset+i][j]][0].append(harmonicsMag)
-                    segments_open[allf0s[onset+i][j]][2].append(allErrors[onset+i][j])
-                    open_increasing[allf0s[onset+i][j]] = True   
-                    
-                elif (allf0s[onset+i][j]-1) in segments_open:
-                    segments_open[allf0s[onset+i][j]] = segments_open[allf0s[onset+i][j]-1]
-                    del segments_open[allf0s[onset+i][j]-1]
-                    del open_increasing[allf0s[onset+i][j]-1]
-                    
-                    harmonicsMag = dBsum(mX[onset+i][((allf0s[onset+i][j])*np.arange(1,10)).astype(int)])
-                    segments_open[allf0s[onset+i][j]][0].append(harmonicsMag)
-                    segments_open[allf0s[onset+i][j]][2].append(allErrors[onset+i][j])
-                    open_increasing[allf0s[onset+i][j]] = True   
-                    
-                else: 
-                    harmonicsMag = dBsum(mX[onset+i][(allf0s[onset+i][j]*np.arange(1,10)).astype(int)])
-                    segments_open[allf0s[onset+i][j]] = [[harmonicsMag],[i],[allErrors[onset+i][j]]]
-                    open_increasing[allf0s[onset+i][j]] = True
-                    
-        for key in open_increasing:
-            if open_increasing[key]==False:
-                segments_open[key][1].append(i)
-                finishedSegment = segments_open.pop(key)
-                if key not in segments_closed: #
-                    segments_closed[key] = []
-                segments_closed[key].append(finishedSegment)
-                
-                
-                if verbose:
-                    line = [(finishedSegment[1][0],key),(finishedSegment[1][1],key)]
-                    lines.append(line)
-        
-    for key in open_increasing:
-            if open_increasing[key]==True:
-                segments_open[key][1].append(i)
-                finishedSegment = segments_open.pop(key)
-                if key not in segments_closed:
-                    segments_closed[key] = []
-                segments_closed[key].append(finishedSegment)
-                
-                if verbose:
-                    line = [(finishedSegment[1][0],key),(finishedSegment[1][1],key)]                   
-                    lines.append(line)
-        
-                
-    if verbose:
-        print("Total n of segments: %d" %len(lines))
-        lc = mc.LineCollection(lines, linewidths=2)
-        fig, ax = plt.subplots()
-        ax.add_collection(lc)
-        ax.autoscale()
-        ax.margins(0.1)
-        plt.show()
-        
-    return segments_closed
-                    
 
-
-def harmonicScore(segments,L,verbose):
+def harmonicScore(segments,L,verbose,tFlag):
+    if segments == None:
+        return 0
     skipCountE = 0
     skipCountL = 0
     segmentScores = []
+    freqs = {}
     for key in segments: # key: freqs
+        freqs[key] = []
         for segment in segments[key]:  # each segment of this freq
             mags,startNfinish,errors = segment
             mags = np.asarray(mags)
@@ -494,32 +360,58 @@ def harmonicScore(segments,L,verbose):
             if (startNfinish[1]-startNfinish[0])<L:
                 skipCountL += 1
                 continue
-            if np.mean(errors)>40:
+            if np.mean(errors)>80:
                 skipCountE += 1
                 continue
             
-            errors[errors==0] = 1
-            #mags = 10**(mags/20)
-            mags = 2**((mags+80)/6)
-            segmentScore = mags*(1/errors)
-
-            #magb = magb+90
-            segmentScores.append(np.sum(segmentScore))
+            errors[errors<1] = 1
+            segmentScore = np.sum((100+mags)/errors)/L
+            freqs[key].append([segmentScore,startNfinish])
+            segmentScores.append(segmentScore) 
             
-    score = sum(segmentScores)#/len(segmentScores) # is mean good?
+    freqs = {k:freqs[k] for k in freqs.keys() if freqs[k]!=[]}
+    score = sum(segmentScores)
+    if tFlag:
+        print("%d due to Length, %d due to Error, segment skipped" %(skipCountL,skipCountE))
+        if len(segmentScores)==(skipCountL+skipCountE):
+            print("no segments")
     if verbose:
         print("%d due to Length, %d due to Error, segment skipped" %(skipCountL,skipCountE))
         if len(segmentScores)==(skipCountL+skipCountE):
             print("no segments")
-    return score
+        
+    return score,freqs,segmentScores
     
     
-def od(filedir):
-    offset = 16*128/44100
-    fs, x = UF.wavread(filedir)
-    if fs != 44100:
-        print(" %s sampling rate: %d" %(filedir,fs))
-    mX,pX = fTransform(x)
-    sf,sfn,mX,pX = MRSF(mX,pX,B=[0,850],a=51,b=3)
-    orig,result,errors,scores = odf(sf,sfn,mX,pX,verbose=[],onlySelected = False,hc=-3,div=10,L=30)
-    return (result*(128/fs))+offset
+def od(filedir,hc=-1,div=7,L=20,a=51,res="low",gt=[],verbose=np.array([]),oS= False):
+    fs, x = read(filedir)
+    
+    if res == "high":
+        M = [8191,4095,2047,1023]
+        N = 8192
+        H = 128 # !! 128
+        B = [[0,int(1000*N/fs)],[int(1000*N/fs),int(2000*N/fs)],[int(2000*N/fs),int(5000*N/fs)],[int(5000*N/fs),int(fs/2)]]
+    
+    if res == "med":
+        M = [8191,2047,1023]
+        N = 8192
+        H = 128
+        B = [[0,int(1000*N/fs)],[int(1000*N/fs),int(5000*N/fs)],[int(5000*N/fs),int(fs/2)]]
+    
+    if res == "low":
+        M = [4095,2047]
+        N = 4096
+        H = 128
+        B = [[0,int(2000*N/fs)],[int(2000*N/fs),int(fs/2)]]
+    params= (M,N,H,B)
+   
+        
+    mX,pX = fTransform(x,fs,params)
+    
+    sf,sfn= MRSF(mX,B=[0,int(2000*N/fs)],a=a,b=3)
+     
+     
+    candids,result,freqs,scores = ha(sf,sfn,mX,pX,verbose=np.rint(verbose*fs/H).astype(int),onlySelected = oS,hc=hc,div=div,L=L,params=params,fs=fs,gt=gt)
+
+
+    return result*H/fs,candids*H/fs,freqs

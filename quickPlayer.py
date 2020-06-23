@@ -14,9 +14,18 @@ from tkinter import messagebox as tkMessageBox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.backend_bases import Event
 
-def quickPlayer(soundfile,data,stamps,names,h=128,onlyValues=False):
+def quickPlayer(soundfile,data,stamps,names,h=128,onlyValues=False,regions=None):
     """
-    onlyValues: If  provided time stamps does not hae IDs or names, this should be True. Manually annotated files will have IDs and names for the stamps  . 
+    USAGE:
+    press spacebar to start/stop playing. 
+    Navigate by clicking on plot, and with 'zoom' and 'pan' features of the toolbar.
+    Zoom: Click and drag. Right click to zoom out.
+   
+    Plot and player will automatically follow if zoomed. But if zoomed too much, it may cause stuttering.
+    Panning while audio is being played will cause stuttering.
+    
+    ARGS:
+    onlyValues: If  provided time stamps does not have IDs or names (so just lines to be drawn), this should be True. Manually annotated files will have IDs and names for the stamps  . 
     
     soundfile: sound file to be played
     data: data that shown on the player plot
@@ -52,7 +61,14 @@ def quickPlayer(soundfile,data,stamps,names,h=128,onlyValues=False):
     cursor.set_xdata(0)
 
     for d in data:
-        mainplot.plot(d)
+        if d.ndim == 2:
+             ymax = d.shape[1]
+             ymin = 0
+             mainplot.pcolormesh(np.arange(d.shape[0]), np.arange(d.shape[1]), np.transpose(d))
+        if d.ndim == 1:
+            ymax = np.max(data[0])
+            ymin= np.min(data[0])
+            mainplot.plot(d)
     global x0,x1
     x0,x1 = mainplot.get_xlim() 
     
@@ -169,17 +185,22 @@ def quickPlayer(soundfile,data,stamps,names,h=128,onlyValues=False):
 
     canvas.draw()
     
-    ymax = max(data[0])
     
     colors = ['c','m','y','r','#FFBD33','#924A03','#D00000','#D000D0','#6800D0','#095549','b','r','r']
     if onlyValues:
         for i in range(len(stamps)):
-            mainplot.draw_artist(mainplot.vlines(x=stamps[i],color=colors[i],ymin=-ymax,ymax=ymax))
+            mainplot.draw_artist(mainplot.vlines(x=np.array(stamps[i])/h,color=colors[i],ymin=ymin,ymax=ymax,label=names[i]))
+            mainplot.legend(loc="upper left")
     else:   
         for i in range(len(stamps)):
             for j in stamps[i]:
-                mainplot.draw_artist(mainplot.axvline(x=j[1],color=colors[i]))
-                mainplot.text(j[1]+2, (0.9*ymax)+(i*0.02), names[i] + j[0], bbox=dict(fill=False, edgecolor=colors[i], linewidth=1))
+                mainplot.draw_artist(mainplot.axvline(x=j[1]/h,ymin=ymin,ymax=ymax,color=colors[i]))
+                mainplot.text(j[1]/h+2, (0.8*ymax)+(i*0.04), names[i] + str(j[0]), bbox=dict(fill=False, edgecolor=colors[i], linewidth=1))
+                
+    if regions!=None:
+        for r in regions:
+            mainplot.fill_betweenx([ymin,ymax], r[0],r[1], facecolor='blue', alpha=0.5)
+            
     canvas.draw()
     background = canvas.copy_from_bbox(mainplot.bbox)
     
@@ -187,12 +208,11 @@ def quickPlayer(soundfile,data,stamps,names,h=128,onlyValues=False):
       
     for func in [stream.close,
              wf.close,
-             p.terminate]:
+             p.terminate,
+             parent.destroy]:
         try:
             func()
         except:
             pass
-
-    parent.destroy() 
     
     return

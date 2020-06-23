@@ -19,3 +19,6 @@ Music Critic Dataset
 | GuitarOnsetDetector |   0.80      |    0.80       |    0.80  |
 | SF-HA               | 0.85   | 0.86     | 0.84  |
 
+
+GuitarSet: https://github.com/marl/GuitarSet
+Annotation of the music critic dataset is done with https://github.com/srvrc/Sound-Annotator
